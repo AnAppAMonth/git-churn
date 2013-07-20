@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 import subprocess
 
-# Each key is the SHA-1 hash of a processed commit. Before processing
-# each commit we check this dictionary and only proceed if it's not
-# already processed.
-processed = {}
+# Each key is the SHA-1 hash of a processed commit. The value is the
+# temporary result at the point. Each value is changed to empty ([])
+# after it's used for the first time, to avoid repeated inclusion of
+# the same diffstat. Note that values at commits other than the HEAD
+# are normally different than the results you'd get if doing a churn
+# on corresponding commits.
+result_cache = {}
 
 # Each key is the SHA-1 hash of a commit. The value is the parent(s)
 # of the commit.
@@ -12,6 +15,11 @@ parents_cache = {}
 # Each key is the SHA-1 hash of a commit. The value is the diffstats
 # of the commit (compared to its parent).
 diffstats_cache = {}
+
+# This list contains SHA-1 hashes of all the commits extracted from
+# the git-log call, in the order presented by git-log.
+commits = []
+
 
 # Repeatedly calling git-diff-tree to get the diffstats works but is
 # too slow. So we have to use the "porcelain" git-log command and parse
@@ -30,6 +38,7 @@ def get_diffstats():
 		try:
 			# First line is the hash of this commit
 			commit = logs[ln]
+			commits.append(commit)
 	
 			# Second line is the hash of its parents
 			parents = logs[ln+1].split()
@@ -70,122 +79,128 @@ def get_diffstats():
 		ln = parse_commit(ln)
 
 
-# This function takes the SHA-1 hash of a commit and returns a list of
+# This function takes the SHA-1 hash of a commit and computes a list of
 # file paths and corresponding insertion and deletion line counts, sorted
 # alphabetically by file paths, according to changes done by this commit
-# AND all its ancestors.
+# AND all its ancestors, and stores the result in result_cache[commit].
 #
 # If this commit and its ancestors don't contain any change to text files
-# (say they only change binary files), or this commit has already been
-# processed before, this function returns an empty list.
+# (say they only change binary files), the result will be an empty list.
+#
+# Note that to avoid recursion, this function must only be called on a
+# commit after it's already called on all its parents, and it's the
+# caller's responsibility to ensure this. After a parent's result is
+# used, its entry in result_cache is emptied to avoid the result being
+# included again. Therefore, after all computations are done, the only
+# non-empty entry in result_cache is result_cache[HEAD], which contains
+# the final result.
 def process_commit(commit):
-	# Only proceed if the commit isn't already processed.
-	if commit not in processed:
-		processed[commit] = True
+	# First get a list of parent hashes of the commit
+	parents = parents_cache[commit]
 
-		# First get a list of parent hashes of the commit
-		parents = parents_cache[commit]
+	# This array contains a list of result arrays to be merged.
+	results = []
 
-		# This array contains a list of result arrays to be merged.
-		results = []
-
-		num_of_parents = len(parents)
-		if num_of_parents > 1:
-			# A merge commit. We ignore merge commits. This is probably
-			# the most reasonable choice, and is also what "hg churn" does.
-			# So only its parents are processed.
-			for parent in parents:
-				parent_result = process_commit(parent)
-				if len(parent_result) > 0:
-					results.append(parent_result)
-		
-		elif num_of_parents == 1:
-			# This is a normal commit, process its only parent
-			parent = parents[0]
-			parent_result = process_commit(parent)
+	num_of_parents = len(parents)
+	if num_of_parents > 1:
+		# A merge commit. We ignore merge commits. This is probably
+		# the most reasonable choice, and is also what "hg churn" does.
+		# So only its parents are processed.
+		for parent in parents:
+			parent_result = result_cache[parent]
 			if len(parent_result) > 0:
+				# Make sure this diffstat is only counted once
+				result_cache[parent] = []
 				results.append(parent_result)
-			
-			# Now get the diffstats of the commit (against its parent)
-			stats = diffstats_cache[commit]
-			if len(stats) > 0:
-				results.append(stats)
-		
-		else:
-			# This is a root commit
-			return diffstats_cache[commit]
-		
-		# Finally merge result arrays in results to get the result for this
-		# commit.
-		#
-		# Note that we don't currently try to detect renames. So a rename
-		# will cause N deletions and N insertions, in total 2N line changes.
-		# It also seems like "hg churn" works the same way.
-		#
-		# Also note that we utilize the fact that git sorts the output of
-		# git-diff-tree by file paths in the alphabetical order to facilitate
-		# the merge.
-		
-		# We only need to merge if there are more than one entries in results
-		num_of_results = len(results)
-		if num_of_results == 1:
-			return results[0]
-		elif num_of_results == 0:
-			return []
-		else:
-			retval = []
 	
-			N = len(results)
-			indices = []
-			for i in range(N):
-				indices.append(0)
-				
-			while True:
-				# Do an N-way merge 
-				(path, insertions, deletions) = results[0][indices[0]]
-				chosen = [0]
-				for i in range(1, N):
-					if results[i][indices[i]][0] < path:
-						# This path is smaller, take this
-						(path, insertions, deletions) = results[i][indices[i]]
-						chosen = [i]
-					elif results[i][indices[i]][0] == path:
-						# This is the same path, merge the line counts
-						insertions += results[i][indices[i]][1]
-						deletions += results[i][indices[i]][2]
-						chosen.append(i)
-
-				# Add the new path into the result list
-				retval.append((path, insertions, deletions))
-
-				# Finally increment the indices of the chosen arrays
-				for i in range(len(chosen)-1, -1, -1):
-					idx = chosen[i]
-					indices[idx] += 1
-					if indices[idx] >= len(results[idx]):
-						# results[i] doesn't contain new entries, remove this list
-						results.pop(idx)
-						indices.pop(idx)
-						N -= 1
-
-				if N == 0:
-					# We are done.
-					break
-			
-			return retval
-
+	elif num_of_parents == 1:
+		# This is a normal commit, process its only parent
+		parent = parents[0]
+		parent_result = result_cache[parent]
+		if len(parent_result) > 0:
+			# Make sure this diffstat is only counted once
+			result_cache[parent] = []
+			results.append(parent_result)
+		
+		# Now get the diffstats of the commit (against its parent)
+		stats = diffstats_cache[commit]
+		if len(stats) > 0:
+			results.append(stats)
+	
 	else:
-		# This commit is already processed, return an empty list
-		return []
+		# This is a root commit
+		result_cache[commit] = diffstats_cache[commit]
+		return
+	
+	# Finally merge result arrays in results to get the result for this
+	# commit.
+	#
+	# Note that we don't currently try to detect renames. So a rename
+	# will cause N deletions and N insertions, in total 2N line changes.
+	# It also seems like "hg churn" works the same way.
+	#
+	# Also note that we utilize the fact that git sorts the output of
+	# git-diff-tree by file paths in the alphabetical order to facilitate
+	# the merge.
+	
+	# We only need to merge if there are more than one entries in results
+	num_of_results = len(results)
+	if num_of_results == 1:
+		result_cache[commit] = results[0]
+	elif num_of_results == 0:
+		result_cache[commit] = []
+	else:
+		retval = []
+
+		N = len(results)
+		indices = []
+		for i in range(N):
+			indices.append(0)
+			
+		while True:
+			# Do an N-way merge 
+			(path, insertions, deletions) = results[0][indices[0]]
+			chosen = [0]
+			for i in range(1, N):
+				if results[i][indices[i]][0] < path:
+					# This path is smaller, take this
+					(path, insertions, deletions) = results[i][indices[i]]
+					chosen = [i]
+				elif results[i][indices[i]][0] == path:
+					# This is the same path, merge the line counts
+					insertions += results[i][indices[i]][1]
+					deletions += results[i][indices[i]][2]
+					chosen.append(i)
+
+			# Add the new path into the result list
+			retval.append((path, insertions, deletions))
+
+			# Finally increment the indices of the chosen arrays
+			for i in range(len(chosen)-1, -1, -1):
+				idx = chosen[i]
+				indices[idx] += 1
+				if indices[idx] >= len(results[idx]):
+					# results[i] doesn't contain new entries, remove this list
+					results.pop(idx)
+					indices.pop(idx)
+					N -= 1
+
+			if N == 0:
+				# We are done.
+				break
+		
+		result_cache[commit] = retval
 
 
-
-# First find the hash of the HEAD
-head = subprocess.check_output('git rev-parse HEAD', shell=True).strip()
-
-# Now process HEAD
+# First call git-log and get all diffstats
 get_diffstats()
-result = process_commit(head)
+
+# Process commits in chronological order
+for i in range(len(commits)-1, -1, -1):
+	process_commit(commits[i])
+
+# Now the final result is stored in result_cache[HEAD]
+result = result_cache[commits[0]]
 
 # Print the result
 changed = len(result)
