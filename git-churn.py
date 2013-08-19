@@ -1,5 +1,9 @@
 #!/usr/bin/env python
+
+VERSION = '0.0.1'
+
 import subprocess
+import argparse
 
 needs_author = False
 needs_date = False
@@ -8,7 +12,7 @@ needs_date = False
 # too slow. So we have to use the "porcelain" git-log command and parse
 # its output. This function does just that and merges the diffstats to
 # compute the final result.
-def process_diffstats():
+def process_diffstats(remaining):
 	# First produce the format string to use according to options
 	if needs_author and needs_date:
 		format_str = '%aN%n%aE%n%at'
@@ -19,8 +23,8 @@ def process_diffstats():
 	else:
 		format_str = ''
 
-	logs = subprocess.check_output(
-		'git log --numstat --format="format:%s"' % format_str, shell=True).splitlines()
+	cmd_str = 'git log --numstat --format="format:%s" %s' % (format_str, ' '.join(remaining))
+	logs = subprocess.check_output(cmd_str, shell=True).splitlines()
 
 	# This dictionary holds the merge result so far. Each key is a file
 	# path, and its value is the total insertions and deletions currently
@@ -94,8 +98,28 @@ def process_diffstats():
 
 
 if __name__ == "__main__":
+	usage = 'git churn [<options>] [<revision range>] [[--] <path>...]'
+	description = """\
+    This command displays line change stats for each file as well
+    as the entire repository over the specified range of commits.
+
+    The range of commits can be specified using the same mechanism
+    supported by git-log(1), including the <revision range> and
+    <path> arguments, and git-log(1)'s supported options under the
+    "Commit Limiting" section. See git-log(1)'s manpage for detailed
+    descriptions.
+
+    Don't use other options of git-log(1), especially those that
+    affect how its output is formatted! This command may fail to
+    work as expected if you do so.
+"""
+	parser = argparse.ArgumentParser(usage=usage, description=description,
+									 formatter_class=argparse.RawDescriptionHelpFormatter)
+	parser.add_argument('-v', '--version', action='version', version="%(prog)s version " + VERSION)
+	ns, remaining = parser.parse_known_args()
+
 	# First call git-log and process all the diffstats
-	result = process_diffstats()
+	result = process_diffstats(remaining)
 
 	# The final result is already in result but in the form of a dictionary.
 	# We need to sort the results by file path and print them.
