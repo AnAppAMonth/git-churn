@@ -24,7 +24,10 @@ def process_diffstats(remaining):
 		format_str = ''
 
 	cmd_str = 'git log --numstat --format="format:%s" %s' % (format_str, ' '.join(remaining))
-	logs = subprocess.check_output(cmd_str, shell=True).splitlines()
+	try:
+		logs = subprocess.check_output(cmd_str, shell=True).splitlines()
+	except:
+		exit(1)
 
 	# This dictionary holds the merge result so far. Each key is a file
 	# path, and its value is the total insertions and deletions currently
