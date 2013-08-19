@@ -34,25 +34,32 @@ def process_diffstats():
 			x = 0
 
 			if needs_author:
+				# TODO: verify these two lines are indeed author name and email
 				author_name = logs[ln]
 				author_email = logs[ln + 1]
 				x += 2
 
 			if needs_date:
+				# TODO: verify this line is indeed author date
 				author_date = logs[ln + x]
 				x += 1
 
 			# The next line is either the first line of this commit's
 			# diffstats or the first line of the next commit (its parent).
 			items = logs[ln + x].strip().split('\t')
-			while len(items) >= 3:
+			while len(items) == 3:
 				try:
 					insertions = int(items[0])
 					deletions = int(items[1])
 					path = items[2]
 				except ValueError:
-					# This is a binary file, ignore it
-					pass
+					if (items[0] == '-' and items[1] == '-'):
+						# This is a binary file, ignore it
+						pass
+					else:
+						# Unexpected line, this commit's numstats session
+						# must be over.
+						break
 				else:
 					# Merge this entry into result
 					if path in result:
@@ -68,6 +75,10 @@ def process_diffstats():
 			# Diffstats end with an empty line, jump past that
 			if items[0] == '':
 				x += 1
+
+			# Unexpected line encountered, jump over it
+			if x == 0:
+				x = 1
 
 			return ln + x
 
